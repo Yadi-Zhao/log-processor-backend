@@ -1,12 +1,12 @@
 # Ingestion Lambda - handles API requests
 resource "aws_lambda_function" "ingestion" {
-  filename         = "${path.module}/../lambda-packages/ingestion.zip"
-  function_name    = "${var.project_name}-ingestion"
-  role            = aws_iam_role.lambda_exec.arn
-  handler         = "lambda_function.lambda_handler"
-  runtime         = "python3.11"
-  timeout         = 30
-  memory_size     = 256
+  filename      = "${path.module}/../lambda-packages/ingestion.zip"
+  function_name = "${var.project_name}-ingestion"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 30
+  memory_size   = 256
 
   source_code_hash = filebase64sha256("${path.module}/../lambda-packages/ingestion.zip")
 
@@ -24,13 +24,13 @@ resource "aws_lambda_function" "ingestion" {
 
 # Worker Lambda - processes queued messages
 resource "aws_lambda_function" "worker" {
-  filename         = "${path.module}/../lambda-packages/worker.zip"
-  function_name    = "${var.project_name}-worker"
-  role            = aws_iam_role.lambda_exec.arn
-  handler         = "lambda_function.lambda_handler"
-  runtime         = "python3.11"
-  timeout         = 900  # 15 minutes for long processing
-  memory_size     = 512
+  filename      = "${path.module}/../lambda-packages/worker.zip"
+  function_name = "${var.project_name}-worker"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900 # 15 minutes for long processing
+  memory_size   = 512
 
   source_code_hash = filebase64sha256("${path.module}/../lambda-packages/worker.zip")
 
@@ -54,10 +54,10 @@ resource "aws_lambda_event_source_mapping" "sqs_trigger" {
   event_source_arn = aws_sqs_queue.log_queue.arn
   function_name    = aws_lambda_function.worker.arn
   batch_size       = 10
-  
+
   # Wait up to 5 seconds to collect more messages before triggering
   maximum_batching_window_in_seconds = 5
-  
+
   # Allow up to 100 concurrent Lambda invocations
   scaling_config {
     maximum_concurrency = 100

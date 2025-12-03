@@ -1,8 +1,8 @@
 resource "aws_sqs_queue" "log_queue" {
   name                       = "${var.project_name}-queue"
-  visibility_timeout_seconds = 900  # Match Lambda timeout
-  message_retention_seconds  = 1209600  # 14 days
-  receive_wait_time_seconds  = 20  # Enable long polling
+  visibility_timeout_seconds = 900     # Match Lambda timeout
+  message_retention_seconds  = 1209600 # 14 days
+  receive_wait_time_seconds  = 20      # Enable long polling
 
   # Retry failed messages up to 3 times before moving to DLQ
   redrive_policy = jsonencode({
