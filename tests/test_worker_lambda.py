@@ -533,7 +533,7 @@ class TestEdgeCases:
         """
         from lambda_function import lambda_handler
         
-        text_with_special_chars = "Error: ñoño™ — "quotes" & <tags> 中文"
+        text_with_special_chars = "Error: ñoño™ — \"quotes\" & <tags> 中文"
         
         event = {
             'Records': [
