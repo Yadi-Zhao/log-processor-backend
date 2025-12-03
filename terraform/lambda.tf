@@ -1,14 +1,27 @@
+# Data source to automatically package ingestion Lambda
+data "archive_file" "ingestion" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda/ingestion"
+  output_path = "${path.module}/../lambda-packages/ingestion.zip"
+}
+
+# Data source to automatically package worker Lambda
+data "archive_file" "worker" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda/worker"
+  output_path = "${path.module}/../lambda-packages/worker.zip"
+}
+
 # Ingestion Lambda - handles API requests
 resource "aws_lambda_function" "ingestion" {
-  filename      = "${path.module}/../lambda-packages/ingestion.zip"
-  function_name = "${var.project_name}-ingestion"
-  role          = aws_iam_role.lambda_exec.arn
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 30
-  memory_size   = 256
-
-  source_code_hash = filebase64sha256("${path.module}/../lambda-packages/ingestion.zip")
+  filename         = data.archive_file.ingestion.output_path
+  function_name    = "${var.project_name}-ingestion"
+  role             = aws_iam_role.lambda_exec.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.11"
+  timeout          = 30
+  memory_size      = 256
+  source_code_hash = data.archive_file.ingestion.output_base64sha256
 
   environment {
     variables = {
@@ -24,15 +37,14 @@ resource "aws_lambda_function" "ingestion" {
 
 # Worker Lambda - processes queued messages
 resource "aws_lambda_function" "worker" {
-  filename      = "${path.module}/../lambda-packages/worker.zip"
-  function_name = "${var.project_name}-worker"
-  role          = aws_iam_role.lambda_exec.arn
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 900 # 15 minutes for long processing
-  memory_size   = 512
-
-  source_code_hash = filebase64sha256("${path.module}/../lambda-packages/worker.zip")
+  filename         = data.archive_file.worker.output_path
+  function_name    = "${var.project_name}-worker"
+  role             = aws_iam_role.lambda_exec.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.11"
+  timeout          = 900 # 15 minutes for long processing
+  memory_size      = 512
+  source_code_hash = data.archive_file.worker.output_base64sha256
 
   environment {
     variables = {
