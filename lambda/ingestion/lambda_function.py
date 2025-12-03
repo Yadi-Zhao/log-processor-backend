@@ -2,12 +2,9 @@ import json
 import boto3
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 
-sqs = boto3.client(
-    'sqs',
-    region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-)
+sqs = boto3.client('sqs') 
 QUEUE_URL = os.environ.get('SQS_QUEUE_URL')
 
 def lambda_handler(event, context):
@@ -65,7 +62,7 @@ def lambda_handler(event, context):
             'log_id': log_id,
             'text': text,
             'source': source,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': datetime.now(UTC).isoformat()
         }
         
         # Queue message for async processing

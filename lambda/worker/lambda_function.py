@@ -3,14 +3,10 @@ import boto3
 import os
 import time
 import re
-from datetime import datetime
+from datetime import datetime, UTC
 from decimal import Decimal
 
-dynamodb = boto3.resource(
-    'dynamodb',
-    region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-)
-
+dynamodb = boto3.resource('dynamodb')
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE')
 table = dynamodb.Table(TABLE_NAME)
 
@@ -50,7 +46,7 @@ def lambda_handler(event, context):
                     'original_text': text,
                     'modified_data': modified_text,
                     'ingested_at': ingestion_timestamp,
-                    'processed_at': datetime.utcnow().isoformat(),
+                    'processed_at': datetime.now(UTC).isoformat(),
                     'text_length': len(text),
                     'processing_time_sec': Decimal(str(round(processing_time, 2)))
                 }
