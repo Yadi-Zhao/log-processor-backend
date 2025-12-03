@@ -1,0 +1,197 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-test.txt') }}
+      
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+      
+      - name: Run unit tests with coverage
+        run: |
+          pytest tests/ -v --cov=lambda/ --cov-report=term --cov-report=xml
+      
+      - name: Check coverage threshold
+        run: |
+          pytest tests/ --cov=lambda/ --cov-fail-under=75
+
+
+  validate:
+    name: Validate Code
+    runs-on: ubuntu-latest
+    needs: test  
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Lint Lambda code
+        run: |
+          pip install flake8
+          flake8 lambda/ --count --select=E9,F63,F7,F82 --show-source --statistics
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform format check
+        working-directory: ./terraform
+        run: terraform fmt -check
+      
+      - name: Terraform validate
+        working-directory: ./terraform
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  
+  package:
+    name: Package Lambda Functions
+    runs-on: ubuntu-latest
+    needs: [test, validate]  
+    if: github.ref == 'refs/heads/main'
+    
+    strategy:
+      matrix:
+        lambda: [ingestion, worker]
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Package Lambda
+        run: |
+          cd lambda/${{ matrix.lambda }}
+          mkdir -p package
+          cp lambda_function.py package/
+          cd package
+          zip -r ../lambda.zip .
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: lambda-${{ matrix.lambda }}
+          path: lambda/${{ matrix.lambda }}/lambda.zip
+          retention-days: 1
+
+
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download Lambda artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: ./artifacts
+      
+      - name: Prepare Lambda packages
+        run: |
+          mkdir -p lambda-packages
+          mv artifacts/lambda-ingestion/lambda.zip lambda-packages/ingestion.zip
+          mv artifacts/lambda-worker/lambda.zip lambda-packages/worker.zip
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform init
+        working-directory: ./terraform
+        run: terraform init
+      
+      - name: Terraform plan
+        working-directory: ./terraform
+        run: terraform plan -out=tfplan
+      
+      - name: Terraform apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve tfplan
+      
+      - name: Get API URL
+        id: api_url
+        working-directory: ./terraform
+        run: |
+          API_URL=$(terraform output -raw api_gateway_url)
+          echo "url=$API_URL" >> $GITHUB_OUTPUT
+          echo "Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "**API URL:** $API_URL" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Test API endpoint
+        run: |
+          sleep 10
+          
+          echo "Testing JSON ingestion..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            ${{ steps.api_url.outputs.url }} \
+            -H "Content-Type: application/json" \
+            -d '{"tenant_id":"test","log_id":"ci-test","text":"CI test message"}')
+          
+          if [ $response -eq 202 ]; then
+            echo "JSON test passed (HTTP $response)"
+          else
+            echo "JSON test failed (HTTP $response)"
+            exit 1
+          fi
+          
+          echo "Testing TXT ingestion..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            ${{ steps.api_url.outputs.url }} \
+            -H "Content-Type: text/plain" \
+            -H "X-Tenant-ID: test" \
+            -d "CI test plain text log")
+          
+          if [ $response -eq 202 ]; then
+            echo "TXT test passed (HTTP $response)"
+          else
+            echo "TXT test failed (HTTP $response)"
+            exit 1
+          fi
+
+
