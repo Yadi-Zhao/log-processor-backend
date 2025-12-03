@@ -6,9 +6,14 @@ import re
 from datetime import datetime
 from decimal import Decimal
 
-dynamodb = boto3.resource('dynamodb')
+dynamodb = boto3.resource(
+    'dynamodb',
+    region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+)
+
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE')
 table = dynamodb.Table(TABLE_NAME)
+
 
 def lambda_handler(event, context):
     """

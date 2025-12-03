@@ -6,11 +6,8 @@ This file contains fixtures that are shared across multiple test modules.
 
 import pytest
 import os
-import sys
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../lambda/ingestion'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../lambda/worker'))
 
 @pytest.fixture
 def sample_sqs_event():

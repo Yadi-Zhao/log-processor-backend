@@ -4,7 +4,10 @@ import os
 import uuid
 from datetime import datetime
 
-sqs = boto3.client('sqs')
+sqs = boto3.client(
+    'sqs',
+    region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+)
 QUEUE_URL = os.environ.get('SQS_QUEUE_URL')
 
 def lambda_handler(event, context):
