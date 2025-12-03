@@ -71,9 +71,12 @@ def redact_sensitive_data(text):
     """
     Remove PII from log text.
     """
-    # Redact phone numbers
-    text = re.sub(r'\d{3}-\d{4}', '[REDACTED]', text)
+    
+    # Redact 10-digit phone numbers FIRST (before 7-digit)
     text = re.sub(r'\d{3}-\d{3}-\d{4}', '[REDACTED]', text)
+    
+    # Then redact 7-digit phone numbers
+    text = re.sub(r'\d{3}-\d{4}', '[REDACTED]', text)
     
     # Redact IP addresses
     text = re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', '[IP_REDACTED]', text)

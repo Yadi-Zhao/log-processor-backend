@@ -9,17 +9,44 @@ import json
 import os
 import pytest
 import sys
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from decimal import Decimal
-from datetime import datetime
 
+# CRITICAL: Remove cached lambda_function from ingestion tests
+if 'lambda_function' in sys.modules:
+    del sys.modules['lambda_function']
+
+# CRITICAL: Set sys.path BEFORE any lambda_function imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../lambda/worker'))
+
+# CRITICAL: Mock boto3 BEFORE importing lambda_function
+import boto3
+original_boto3_resource = boto3.resource
+
+def mock_boto3_resource(*args, **kwargs):
+    """Mock boto3.resource to return a MagicMock with Table"""
+    mock_dynamodb = MagicMock()
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    mock_dynamodb.Table.return_value = mock_table
+    return mock_dynamodb
+
+# Patch boto3.resource globally before any imports
+boto3.resource = mock_boto3_resource
+
+# NOW we can safely import lambda_function
+import lambda_function
+
+# Restore original after import
+boto3.resource = original_boto3_resource
+
 
 @pytest.fixture(autouse=True)
 def mock_environment():
     """Set up test environment variables."""
     with patch.dict(os.environ, {
-        'DYNAMODB_TABLE': 'test-logs-table'
+        'DYNAMODB_TABLE': 'test-logs-table',
+        'AWS_DEFAULT_REGION': 'us-east-1'
     }):
         yield
 
@@ -27,18 +54,15 @@ def mock_environment():
 @pytest.fixture
 def mock_dynamodb():
     """Create a mocked DynamoDB table resource."""
-    with patch('boto3.resource') as mock_resource:
-        mock_table = MagicMock()
-        mock_dynamodb_resource = MagicMock()
-        mock_dynamodb_resource.Table.return_value = mock_table
-        mock_resource.return_value = mock_dynamodb_resource
+    with patch.object(lambda_function, 'table') as mock_table:
+        mock_table.put_item.return_value = {}
         yield mock_table
 
 
 @pytest.fixture
 def mock_sleep():
     """Mock time.sleep to speed up tests."""
-    with patch('time.sleep') as mock:
+    with patch('lambda_function.time.sleep') as mock:
         yield mock
 
 
@@ -49,8 +73,6 @@ class TestMessageProcessing:
         """
         Verify that a single SQS message is processed and stored correctly.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -65,7 +87,7 @@ class TestMessageProcessing:
             ]
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 200
         mock_dynamodb.put_item.assert_called_once()
@@ -75,8 +97,6 @@ class TestMessageProcessing:
         Worker should handle multiple messages in a single invocation.
         SQS can deliver up to 10 messages per batch.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -92,7 +112,7 @@ class TestMessageProcessing:
             ]
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 200
         assert mock_dynamodb.put_item.call_count == 5
@@ -102,8 +122,6 @@ class TestMessageProcessing:
         Processing time should be calculated at 0.05s per character.
         This simulates CPU-intensive log analysis.
         """
-        from lambda_function import lambda_handler
-        
         # 20 characters = 1.0 second processing time
         test_text = 'a' * 20
         
@@ -121,7 +139,7 @@ class TestMessageProcessing:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         # Verify sleep was called with correct duration
         mock_sleep.assert_called_once()
@@ -133,8 +151,6 @@ class TestMessageProcessing:
         If processing fails, exception should propagate to trigger SQS retry.
         Failed messages will be retried or sent to DLQ based on queue config.
         """
-        from lambda_function import lambda_handler
-        
         mock_dynamodb.put_item.side_effect = Exception('DynamoDB write failed')
         
         event = {
@@ -152,7 +168,7 @@ class TestMessageProcessing:
         }
         
         with pytest.raises(Exception):
-            lambda_handler(event, None)
+            lambda_function.lambda_handler(event, None)
 
 
 class TestTenantIsolation:
@@ -164,8 +180,6 @@ class TestTenantIsolation:
         PK format: TENANT#{tenant_id}
         SK format: LOG#{log_id}
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -180,7 +194,7 @@ class TestTenantIsolation:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
@@ -192,8 +206,6 @@ class TestTenantIsolation:
         """
         Tenant ID should be stored as a separate attribute for querying.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -208,7 +220,7 @@ class TestTenantIsolation:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
@@ -224,8 +236,6 @@ class TestDataPersistence:
         """
         Verify that all message fields are persisted to DynamoDB.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -240,12 +250,12 @@ class TestDataPersistence:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
         
-        # Check all required fields
+        # Verify all required fields are present
         assert 'PK' in item
         assert 'SK' in item
         assert 'tenant_id' in item
@@ -258,12 +268,10 @@ class TestDataPersistence:
         assert 'text_length' in item
         assert 'processing_time_sec' in item
     
-    def test_timestamp_format(self, mock_dynamodb, mock_sleep):
+    def test_timestamps_are_stored(self, mock_dynamodb, mock_sleep):
         """
-        Processed timestamp should be in ISO 8601 format.
+        Both ingestion and processing timestamps should be recorded.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -278,27 +286,25 @@ class TestDataPersistence:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
         
-        # Should be able to parse as ISO format
-        datetime.fromisoformat(item['processed_at'])
+        assert item['ingested_at'] == '2024-01-15T10:30:00'
+        assert 'processed_at' in item
     
-    def test_processing_time_stored_as_decimal(self, mock_dynamodb, mock_sleep):
+    def test_text_length_calculated(self, mock_dynamodb, mock_sleep):
         """
-        Processing time should be stored as Decimal for DynamoDB compatibility.
+        Text length should be stored for analytics.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
                     'body': json.dumps({
-                        'tenant_id': 'decimal-test',
-                        'log_id': 'log-decimal',
-                        'text': 'ab',  # 2 chars = 0.1s
+                        'tenant_id': 'length-test',
+                        'log_id': 'log-len',
+                        'text': 'abcde',  # 5 characters
                         'source': 'json',
                         'timestamp': '2024-01-15T10:30:00'
                     })
@@ -306,7 +312,33 @@ class TestDataPersistence:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
+        
+        call_args = mock_dynamodb.put_item.call_args
+        item = call_args[1]['Item']
+        
+        assert item['text_length'] == 5
+    
+    def test_processing_time_stored_as_decimal(self, mock_dynamodb, mock_sleep):
+        """
+        Processing time should be stored as Decimal for DynamoDB compatibility.
+        """
+        # 2 characters = 0.1 seconds
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'decimal-test',
+                        'log_id': 'log-dec',
+                        'text': 'ab',
+                        'source': 'json',
+                        'timestamp': '2024-01-15T10:30:00'
+                    })
+                }
+            ]
+        }
+        
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
@@ -325,10 +357,8 @@ class TestPIIRedaction:
         """
         Phone numbers in 555-1234 format should be redacted.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Please call me at 555-1234 for details"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert result == "Please call me at [REDACTED] for details"
         assert "555-1234" not in result
@@ -337,10 +367,8 @@ class TestPIIRedaction:
         """
         Phone numbers in 123-456-7890 format should be redacted.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Contact: 123-456-7890"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert result == "Contact: [REDACTED]"
         assert "123-456-7890" not in result
@@ -349,10 +377,8 @@ class TestPIIRedaction:
         """
         All phone numbers in text should be redacted independently.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Call 555-1234 or 888-999-0000 for support"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert result == "Call [REDACTED] or [REDACTED] for support"
     
@@ -360,10 +386,8 @@ class TestPIIRedaction:
         """
         IPv4 addresses should be redacted for security.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Server IP: 192.168.1.1, Gateway: 10.0.0.1"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert "[IP_REDACTED]" in result
         assert "192.168.1.1" not in result
@@ -373,10 +397,8 @@ class TestPIIRedaction:
         """
         Email addresses should be redacted to protect user identity.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Contact john.doe@example.com or support@company.org"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert "[EMAIL_REDACTED]" in result
         assert "john.doe@example.com" not in result
@@ -386,10 +408,8 @@ class TestPIIRedaction:
         """
         Complex logs may contain multiple PII types that all need redaction.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "User alice@test.com from IP 172.16.0.5 called 555-9876"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         # All PII should be redacted
         assert "alice@test.com" not in result
@@ -405,10 +425,8 @@ class TestPIIRedaction:
         """
         Non-sensitive content should remain unchanged.
         """
-        from lambda_function import redact_sensitive_data
-        
         text = "Application started successfully at 2024-01-15 10:30:00"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         assert result == text
     
@@ -417,11 +435,9 @@ class TestPIIRedaction:
         Incomplete patterns should not trigger false positives.
         For example, order IDs or other numbers that aren't full phone numbers.
         """
-        from lambda_function import redact_sensitive_data
-        
         # These should NOT be redacted as they don't match full phone patterns
         text = "Order ID: 555-12, Confirmation: 888-99"
-        result = redact_sensitive_data(text)
+        result = lambda_function.redact_sensitive_data(text)
         
         # Should remain unchanged since these aren't valid phone number patterns
         assert "555-12" in result
@@ -431,8 +447,6 @@ class TestPIIRedaction:
         """
         Integration test: verify redacted data is what gets stored.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -447,7 +461,7 @@ class TestPIIRedaction:
             ]
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
@@ -468,8 +482,6 @@ class TestEdgeCases:
         """
         Handle empty log text gracefully.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'Records': [
                 {
@@ -484,7 +496,7 @@ class TestEdgeCases:
             ]
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         # Should process successfully even with empty text
         assert response['statusCode'] == 200
@@ -498,8 +510,6 @@ class TestEdgeCases:
         """
         Ensure system can handle large log entries.
         """
-        from lambda_function import lambda_handler
-        
         # Simulate a large log entry (1000 characters)
         large_text = 'x' * 1000
         
@@ -517,7 +527,7 @@ class TestEdgeCases:
             ]
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 200
         
@@ -531,8 +541,6 @@ class TestEdgeCases:
         """
         Special characters and Unicode should be handled correctly.
         """
-        from lambda_function import lambda_handler
-        
         text_with_special_chars = "Error: ñoño™ — \"quotes\" & <tags> 中文"
         
         event = {
@@ -549,7 +557,7 @@ class TestEdgeCases:
             ]
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 200
         

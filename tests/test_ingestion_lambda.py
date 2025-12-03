@@ -11,16 +11,37 @@ import pytest
 import sys
 from unittest.mock import patch, MagicMock
 from datetime import datetime
-from unittest.mock import patch, MagicMock
 
+# CRITICAL: Set sys.path BEFORE any lambda_function imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../lambda/ingestion'))
 
-# Mock environment variables before importing the lambda function
+# CRITICAL: Mock boto3 BEFORE importing lambda_function
+# This ensures the module-level boto3.client() call uses our mock
+import boto3
+original_boto3_client = boto3.client
+
+def mock_boto3_client(*args, **kwargs):
+    """Mock boto3.client to return a MagicMock"""
+    mock = MagicMock()
+    mock.send_message.return_value = {'MessageId': 'test-message-id'}
+    return mock
+
+# Patch boto3.client globally before any imports
+boto3.client = mock_boto3_client
+
+# NOW we can safely import lambda_function
+import lambda_function
+
+# Restore original after import (optional, but cleaner)
+boto3.client = original_boto3_client
+
+
 @pytest.fixture(autouse=True)
 def mock_environment():
     """Set up test environment variables."""
     with patch.dict(os.environ, {
-        'SQS_QUEUE_URL': 'https://sqs.us-east-1.amazonaws.com/123456789/test-queue'
+        'SQS_QUEUE_URL': 'https://sqs.us-east-1.amazonaws.com/123456789/test-queue',
+        'AWS_DEFAULT_REGION': 'us-east-1'
     }):
         yield
 
@@ -28,9 +49,10 @@ def mock_environment():
 @pytest.fixture
 def mock_sqs_client():
     """Create a mocked SQS client."""
-    with patch('boto3.client') as mock_client:
-        mock_sqs = MagicMock()
-        mock_client.return_value = mock_sqs
+    with patch.object(lambda_function, 'sqs') as mock_sqs:
+        mock_sqs.send_message.return_value = {
+            'MessageId': 'msg-12345'
+        }
         yield mock_sqs
 
 
@@ -42,12 +64,6 @@ class TestJSONPayloadHandling:
         Verify that a well-formed JSON request with all fields is processed correctly.
         The function should accept the request and queue it for processing.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {
-            'MessageId': 'msg-12345'
-        }
-        
         event = {
             'headers': {
                 'Content-Type': 'application/json'
@@ -59,7 +75,7 @@ class TestJSONPayloadHandling:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 202
         body = json.loads(response['body'])
@@ -79,10 +95,6 @@ class TestJSONPayloadHandling:
         Test that log_id is auto-generated when not provided.
         This allows clients to omit log_id and let the system generate one.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-67890'}
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -91,7 +103,7 @@ class TestJSONPayloadHandling:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 202
         body = json.loads(response['body'])
@@ -103,14 +115,12 @@ class TestJSONPayloadHandling:
         """
         Ensure that invalid JSON syntax is rejected with appropriate error.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': '{"tenant_id": "test", invalid json here}'
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
@@ -125,10 +135,6 @@ class TestPlainTextPayloadHandling:
         """
         Verify plain text requests are accepted when tenant ID is in headers.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-text-123'}
-        
         event = {
             'headers': {
                 'Content-Type': 'text/plain',
@@ -137,7 +143,7 @@ class TestPlainTextPayloadHandling:
             'body': 'Database connection timeout after 30 seconds'
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 202
         body = json.loads(response['body'])
@@ -149,10 +155,6 @@ class TestPlainTextPayloadHandling:
         Ensure header parsing is case-insensitive.
         HTTP headers should be treated case-insensitively per RFC 2616.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-case-test'}
-        
         event = {
             'headers': {
                 'content-TYPE': 'text/plain',  # Mixed case
@@ -161,7 +163,7 @@ class TestPlainTextPayloadHandling:
             'body': 'System health check passed'
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 202
 
@@ -174,8 +176,6 @@ class TestInputValidation:
         Request must be rejected if tenant_id is not provided.
         Tenant isolation requires explicit tenant identification.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -183,7 +183,7 @@ class TestInputValidation:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
@@ -194,8 +194,6 @@ class TestInputValidation:
         """
         Request must include actual log content.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -203,7 +201,7 @@ class TestInputValidation:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
@@ -213,8 +211,6 @@ class TestInputValidation:
         """
         Empty string should not be accepted as a valid tenant ID.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -223,7 +219,7 @@ class TestInputValidation:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
     
@@ -231,14 +227,12 @@ class TestInputValidation:
         """
         Only JSON and plain text are supported content types.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'headers': {'Content-Type': 'application/xml'},
             'body': '<log><text>XML format</text></log>'
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
@@ -253,10 +247,6 @@ class TestMessageQueueing:
         Tenant ID should be included in message attributes for filtering.
         This enables potential SQS-level tenant-based routing in the future.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-attr-test'}
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -265,7 +255,7 @@ class TestMessageQueueing:
             })
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_sqs_client.send_message.call_args
         message_attrs = call_args[1]['MessageAttributes']
@@ -276,10 +266,6 @@ class TestMessageQueueing:
         """
         Each message should be timestamped for audit trail purposes.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-time-test'}
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -288,7 +274,7 @@ class TestMessageQueueing:
             })
         }
         
-        lambda_handler(event, None)
+        lambda_function.lambda_handler(event, None)
         
         call_args = mock_sqs_client.send_message.call_args
         message_body = json.loads(call_args[1]['MessageBody'])
@@ -304,10 +290,6 @@ class TestResponseFormat:
         """
         CORS headers should be included to support web clients.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-cors-test'}
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -316,7 +298,7 @@ class TestResponseFormat:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert 'Access-Control-Allow-Origin' in response['headers']
     
@@ -324,10 +306,6 @@ class TestResponseFormat:
         """
         All responses should indicate JSON content type.
         """
-        from lambda_function import lambda_handler
-        
-        mock_sqs_client.send_message.return_value = {'MessageId': 'msg-ct-test'}
-        
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
@@ -336,7 +314,7 @@ class TestResponseFormat:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['headers']['Content-Type'] == 'application/json'
 
@@ -348,8 +326,6 @@ class TestErrorHandling:
         """
         If SQS is unavailable, return 500 to indicate server-side issue.
         """
-        from lambda_function import lambda_handler
-        
         # Simulate SQS failure
         mock_sqs_client.send_message.side_effect = Exception('SQS service unavailable')
         
@@ -361,7 +337,7 @@ class TestErrorHandling:
             })
         }
         
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 500
         body = json.loads(response['body'])
@@ -371,8 +347,6 @@ class TestErrorHandling:
         """
         Function should handle requests with missing headers dictionary.
         """
-        from lambda_function import lambda_handler
-        
         event = {
             'body': json.dumps({
                 'tenant_id': 'no-headers',
@@ -381,7 +355,7 @@ class TestErrorHandling:
         }
         
         # Should not crash, even though headers are missing
-        response = lambda_handler(event, None)
+        response = lambda_function.lambda_handler(event, None)
         
         # Will likely fail validation, but should return valid response
         assert 'statusCode' in response
