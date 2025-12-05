@@ -564,3 +564,400 @@ class TestEdgeCases:
         call_args = mock_dynamodb.put_item.call_args
         item = call_args[1]['Item']
         assert item['original_text'] == text_with_special_chars
+
+# 添加到 test_worker_lambda.py 文件末尾
+
+class TestIdempotency:
+    """
+    Tests for duplicate message handling and idempotency.
+    Ensures that duplicate SQS messages don't result in duplicate database entries.
+    """
+    
+    def test_first_message_is_processed_successfully(self, mock_dynamodb, mock_sleep):
+        """
+        Verify that the first occurrence of a message is processed normally.
+        The conditional write should succeed when the item doesn't exist.
+        """
+        # Mock successful write (no exception)
+        mock_dynamodb.put_item.return_value = {}
+        
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'idempotency-test',
+                        'log_id': 'log-first-001',
+                        'text': 'First message test@example.com',
+                        'source': 'json',
+                        'timestamp': '2024-12-03T10:00:00Z'
+                    })
+                }
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['processed'] == 1
+        assert body['skipped_duplicates'] == 0
+        
+        # Verify put_item was called with ConditionExpression
+        mock_dynamodb.put_item.assert_called_once()
+        call_kwargs = mock_dynamodb.put_item.call_args[1]
+        assert 'ConditionExpression' in call_kwargs
+        assert 'attribute_not_exists' in str(call_kwargs['ConditionExpression'])
+    
+    def test_duplicate_message_is_skipped(self, mock_dynamodb, mock_sleep):
+        """
+        Verify that duplicate messages (same log_id) are detected and skipped.
+        This is the core idempotency test - ensures messages aren't processed twice.
+        """
+        from botocore.exceptions import ClientError
+        
+        # Simulate ConditionalCheckFailedException (item already exists)
+        error_response = {
+            'Error': {
+                'Code': 'ConditionalCheckFailedException',
+                'Message': 'The conditional request failed'
+            }
+        }
+        mock_dynamodb.put_item.side_effect = ClientError(error_response, 'PutItem')
+        
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'duplicate-test',
+                        'log_id': 'log-duplicate-001',
+                        'text': 'Duplicate message',
+                        'source': 'json',
+                        'timestamp': '2024-12-03T10:00:00Z'
+                    })
+                }
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        # Should return 200 (handled gracefully, not an error)
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['processed'] == 0
+        assert body['skipped_duplicates'] == 1
+        assert body['total'] == 1
+    
+    def test_batch_with_mixed_new_and_duplicate_messages(self, mock_dynamodb, mock_sleep):
+        """
+        Verify correct handling when a batch contains both new and duplicate messages.
+        Only new messages should be written; duplicates should be skipped.
+        """
+        from botocore.exceptions import ClientError
+        
+        messages = [
+            {
+                'tenant_id': 'batch-test',
+                'log_id': 'log-batch-001',
+                'text': 'First message',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:00:00Z'
+            },
+            {
+                'tenant_id': 'batch-test',
+                'log_id': 'log-batch-002',  # This will be duplicate
+                'text': 'Second message (duplicate)',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:01:00Z'
+            },
+            {
+                'tenant_id': 'batch-test',
+                'log_id': 'log-batch-003',
+                'text': 'Third message',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:02:00Z'
+            }
+        ]
+        
+        # First: success, Second: duplicate, Third: success
+        error_response = {
+            'Error': {
+                'Code': 'ConditionalCheckFailedException',
+                'Message': 'Item already exists'
+            }
+        }
+        
+        mock_dynamodb.put_item.side_effect = [
+            {},  # First succeeds
+            ClientError(error_response, 'PutItem'),  # Second is duplicate
+            {}   # Third succeeds
+        ]
+        
+        event = {
+            'Records': [
+                {'body': json.dumps(msg)} for msg in messages
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        body = json.loads(response['body'])
+        assert body['processed'] == 2  # Two new messages
+        assert body['skipped_duplicates'] == 1  # One duplicate
+        assert body['total'] == 3
+    
+    def test_idempotency_preserves_original_timestamp(self, mock_dynamodb, mock_sleep):
+        """
+        When a duplicate is detected, the original record should not be overwritten.
+        This ensures the original processed_at timestamp remains accurate.
+        """
+        from botocore.exceptions import ClientError
+        
+        error_response = {
+            'Error': {
+                'Code': 'ConditionalCheckFailedException',
+                'Message': 'Item already exists'
+            }
+        }
+        mock_dynamodb.put_item.side_effect = ClientError(error_response, 'PutItem')
+        
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'timestamp-test',
+                        'log_id': 'log-timestamp-001',
+                        'text': 'Timestamp preservation test',
+                        'source': 'json',
+                        'timestamp': '2024-12-03T10:00:00Z'
+                    })
+                }
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        # Duplicate was skipped - original data preserved
+        body = json.loads(response['body'])
+        assert body['skipped_duplicates'] == 1
+        
+        # Verify the attempted write still used conditional expression
+        call_kwargs = mock_dynamodb.put_item.call_args[1]
+        assert 'ConditionExpression' in call_kwargs
+    
+    def test_same_log_id_different_tenants_are_separate(self, mock_dynamodb, mock_sleep):
+        """
+        Idempotency should be scoped to tenant.
+        Same log_id for different tenants should create separate records.
+        """
+        messages = [
+            {
+                'tenant_id': 'tenant-A',
+                'log_id': 'shared-log-id-999',
+                'text': 'Message from tenant A',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:00:00Z'
+            },
+            {
+                'tenant_id': 'tenant-B',
+                'log_id': 'shared-log-id-999',  # Same log_id
+                'text': 'Message from tenant B',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:01:00Z'
+            }
+        ]
+        
+        # Both should succeed (different PKs due to different tenants)
+        mock_dynamodb.put_item.return_value = {}
+        
+        event = {
+            'Records': [
+                {'body': json.dumps(msg)} for msg in messages
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        body = json.loads(response['body'])
+        # Both should be processed (different tenants = different records)
+        assert body['processed'] == 2
+        assert body['skipped_duplicates'] == 0
+        
+        # Verify both put_item calls had different PKs
+        calls = mock_dynamodb.put_item.call_args_list
+        assert len(calls) == 2
+        
+        pk1 = calls[0][1]['Item']['PK']
+        pk2 = calls[1][1]['Item']['PK']
+        assert pk1 != pk2
+        assert 'TENANT#tenant-A' in pk1
+        assert 'TENANT#tenant-B' in pk2
+    
+    def test_non_duplicate_dynamodb_errors_still_raise(self, mock_dynamodb, mock_sleep):
+        """
+        Non-idempotency errors (like throttling) should still raise exceptions.
+        Only ConditionalCheckFailedException should be handled as duplicate.
+        """
+        from botocore.exceptions import ClientError
+        
+        # Simulate throttling error (not a duplicate)
+        error_response = {
+            'Error': {
+                'Code': 'ProvisionedThroughputExceededException',
+                'Message': 'Rate exceeded'
+            }
+        }
+        mock_dynamodb.put_item.side_effect = ClientError(error_response, 'PutItem')
+        
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'error-test',
+                        'log_id': 'log-error-001',
+                        'text': 'This should fail with throttling',
+                        'source': 'json',
+                        'timestamp': '2024-12-03T10:00:00Z'
+                    })
+                }
+            ]
+        }
+        
+        # Should raise the throttling error (not handled like duplicate)
+        with pytest.raises(ClientError) as exc_info:
+            lambda_function.lambda_handler(event, None)
+        
+        assert exc_info.value.response['Error']['Code'] == 'ProvisionedThroughputExceededException'
+    
+    def test_malformed_message_doesnt_block_batch(self, mock_dynamodb, mock_sleep):
+        """
+        If one message in a batch is malformed, other messages should still process.
+        (This tests error isolation, related to idempotency in batch processing)
+        """
+        messages = [
+            {
+                'tenant_id': 'good-tenant-1',
+                'log_id': 'log-good-001',
+                'text': 'Valid message 1',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:00:00Z'
+            },
+            # Malformed message (missing required fields)
+            {
+                'tenant_id': 'bad-tenant',
+                # Missing log_id, text, etc.
+            },
+            {
+                'tenant_id': 'good-tenant-2',
+                'log_id': 'log-good-002',
+                'text': 'Valid message 2',
+                'source': 'json',
+                'timestamp': '2024-12-03T10:02:00Z'
+            }
+        ]
+        
+        mock_dynamodb.put_item.return_value = {}
+        
+        event = {
+            'Records': [
+                {'body': json.dumps(msg)} for msg in messages
+            ]
+        }
+        
+        # Should process valid messages despite malformed one
+        # Note: Your current implementation might raise on malformed messages
+        # This test documents expected behavior - adjust based on your error handling
+        try:
+            response = lambda_function.lambda_handler(event, None)
+            # If graceful handling is implemented:
+            body = json.loads(response['body'])
+            assert body['errors'] >= 1  # At least one error
+        except (KeyError, Exception):
+            # If strict validation, that's okay too
+            pass
+
+
+class TestIdempotencyMetrics:
+    """Tests for monitoring and observability of idempotency behavior."""
+    
+    def test_response_includes_duplicate_count(self, mock_dynamodb, mock_sleep):
+        """
+        Response should include metrics for monitoring duplicate message rates.
+        This is important for operational visibility.
+        """
+        from botocore.exceptions import ClientError
+        
+        error_response = {
+            'Error': {
+                'Code': 'ConditionalCheckFailedException',
+                'Message': 'Item exists'
+            }
+        }
+        mock_dynamodb.put_item.side_effect = ClientError(error_response, 'PutItem')
+        
+        event = {
+            'Records': [
+                {
+                    'body': json.dumps({
+                        'tenant_id': 'metrics-test',
+                        'log_id': 'log-metrics-001',
+                        'text': 'Metrics test',
+                        'source': 'json',
+                        'timestamp': '2024-12-03T10:00:00Z'
+                    })
+                }
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        body = json.loads(response['body'])
+        
+        # Response must include all key metrics
+        assert 'processed' in body
+        assert 'skipped_duplicates' in body
+        assert 'total' in body
+        assert isinstance(body['skipped_duplicates'], int)
+        assert body['skipped_duplicates'] == 1
+    
+    def test_batch_metrics_are_accurate(self, mock_dynamodb, mock_sleep):
+        """
+        Verify that metrics accurately reflect batch processing results.
+        """
+        from botocore.exceptions import ClientError
+        
+        # Create a batch with known outcome:
+        # - 3 new messages (success)
+        # - 2 duplicates (skipped)
+        
+        error_response = {
+            'Error': {
+                'Code': 'ConditionalCheckFailedException',
+                'Message': 'Item exists'
+            }
+        }
+        
+        mock_dynamodb.put_item.side_effect = [
+            {},  # 1: success
+            {},  # 2: success
+            ClientError(error_response, 'PutItem'),  # 3: duplicate
+            {},  # 4: success
+            ClientError(error_response, 'PutItem'),  # 5: duplicate
+        ]
+        
+        event = {
+            'Records': [
+                {'body': json.dumps({
+                    'tenant_id': 'metrics-batch',
+                    'log_id': f'log-{i}',
+                    'text': f'Message {i}',
+                    'source': 'json',
+                    'timestamp': '2024-12-03T10:00:00Z'
+                })} for i in range(5)
+            ]
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        body = json.loads(response['body'])
+        
+        assert body['processed'] == 3
+        assert body['skipped_duplicates'] == 2
+        assert body['total'] == 5

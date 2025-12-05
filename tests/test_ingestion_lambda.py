@@ -126,6 +126,37 @@ class TestJSONPayloadHandling:
         body = json.loads(response['body'])
         assert 'error' in body
         assert body['error'] == 'Invalid JSON'
+    
+    def test_reject_json_array(self, mock_sqs_client):
+        """
+        JSON must be an object, not an array.
+        This prevents AttributeError when calling .get() on a list.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps([  # Array instead of object
+                {'tenant_id': 'test', 'text': 'message'}
+            ])
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'array' in body['detail'].lower() or 'object' in body['detail'].lower()
+    
+    def test_reject_json_primitive(self, mock_sqs_client):
+        """
+        JSON must be an object, not a primitive value.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': '"just a string"'  # Primitive string
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
 
 
 class TestPlainTextPayloadHandling:
@@ -237,7 +268,138 @@ class TestInputValidation:
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
         assert 'Unsupported Content-Type' in body['error']
+    
+    def test_reject_non_string_tenant_id(self, mock_sqs_client):
+        """
+        tenant_id must be a string, not a number or other type.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 12345,  # Number, not string
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'tenant_id must be a string' in body['detail'].lower()
+    
+    def test_reject_non_string_text(self, mock_sqs_client):
+        """
+        text must be a string, not an array or other type.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'text': ['array', 'not', 'string']  # Array, not string
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'text must be a string' in body['detail'].lower()
 
+    def test_reject_tenant_id_with_special_characters(self, mock_sqs_client):
+        """
+        tenant_id should only contain alphanumeric, hyphen, and underscore.
+        This prevents injection attacks and data pollution.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': "test'; DROP TABLE--",  # SQL injection attempt
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'letters, numbers, hyphens, and underscores' in body['detail'].lower()
+    
+    def test_reject_tenant_id_with_spaces(self, mock_sqs_client):
+        """
+        tenant_id should not contain spaces or special characters.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test tenant',  # Space
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+    
+    def test_reject_tenant_id_with_symbols(self, mock_sqs_client):
+        """
+        tenant_id should not contain symbols like @, #, $, etc.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test@#$%',
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+    
+    def test_accept_valid_tenant_id_formats(self, mock_sqs_client):
+        """
+        Valid tenant_id formats should be accepted.
+        """
+        valid_tenant_ids = [
+            'test',
+            'test-123',
+            'test_tenant',
+            'TEST-TENANT-123',
+            'tenant_with_underscores',
+            'tenant-with-hyphens'
+        ]
+        
+        for tenant_id in valid_tenant_ids:
+            event = {
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'tenant_id': tenant_id,
+                    'text': 'Test message'
+                })
+            }
+            
+            response = lambda_function.lambda_handler(event, None)
+            assert response['statusCode'] == 202, f"Failed for tenant_id: {tenant_id}"
+    
+    def test_reject_overly_long_tenant_id(self, mock_sqs_client):
+        """
+        tenant_id should not exceed maximum length (100 characters).
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'a' * 101,  # 101 characters
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert '100' in body['detail']  # Mentions the limit
+    
+   
 
 class TestMessageQueueing:
     """Tests for SQS message queuing functionality."""
