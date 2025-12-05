@@ -51,74 +51,65 @@ graph TB
     classDef mergeStyle fill:#FFF9C4,stroke:#F57F17,stroke-width:4px,color:#000
 
     %% Client Layer
-    subgraph CLIENT["📱 CLIENT LAYER"]
-        JSON["JSON Request<br/>Content-Type: application/json<br/>{tenant_id, log_id, text}"]
-        TXT["TXT Request<br/>Content-Type: text/plain<br/>X-Tenant-ID: acme<br/>Raw log text"]
-    end
+    JSON["📱 JSON RequestContent-Type: application/json{tenant_id, log_id, text}"]
+    TXT["📱 TXT RequestContent-Type: text/plainX-Tenant-ID: acme"]
 
     %% API Gateway
-    API["🌐 API GATEWAY<br/>POST /ingest<br/>Returns: 202 Accepted"]
+    API["🌐 API GATEWAYPOST /ingestReturns: 202 Accepted"]
 
     %% Merge Point
-    MERGE["⚡ MERGE POINT<br/>Both formats converge"]
+    MERGE["⚡ MERGE POINTBoth formats converge here"]
 
-    %% Ingestion Lambda with detailed merge logic
-    subgraph INGESTION["🔧 INGESTION LAMBDA - Component A"]
-        direction TB
-        VALIDATE["1. Validate Input"]
-        
-        subgraph NORMALIZE["2. NORMALIZE (How JSON/TXT Merge)"]
-            direction LR
-            JSON_PATH["IF JSON:<br/>tenant_id = body.tenant_id<br/>text = body.text<br/>source = json"]
-            
-            ARROW["→"]
-            
-            TXT_PATH["IF TXT:<br/>tenant_id = header.X-Tenant-ID<br/>text = body<br/>source = text"]
-        end
-        
-        UNIFIED["3. UNIFIED OUTPUT:<br/>{tenant_id, log_id, text, source, timestamp}"]
-        SEND["4. Send to SQS"]
-        
-        VALIDATE --> NORMALIZE
-        NORMALIZE --> UNIFIED
-        UNIFIED --> SEND
-    end
+    %% Ingestion Lambda steps
+    VALIDATE["🔧 INGESTION LAMBDAStep 1: Validate Input"]
+    
+    JSON_NORM["IF JSON:tenant_id = body['tenant_id']text = body['text']source = 'json'"]
+    
+    TXT_NORM["IF TXT:tenant_id = headers['X-Tenant-ID']text = bodysource = 'text'"]
+    
+    UNIFIED["✅ UNIFIED OUTPUT{tenant_id, log_id, text, source, timestamp}"]
+    
+    SEND["Step 4: Send to SQS"]
 
     %% SQS Queue
-    SQS["📬 AWS SQS QUEUE<br/>Visibility: 900s | Retry: 3x<br/>Batch: 10 msgs | Concurrency: 100"]
+    SQS["📬 AWS SQS QUEUEVisibility: 900s | Retry: 3xBatch: 10 msgs | Concurrency: 100"]
 
     %% Worker Lambda
-    subgraph WORKER["⚙️ WORKER LAMBDA - Component B"]
-        direction TB
-        W1["1. Receive SQS Batch"]
-        W2["2. Process: sleep 0.05s per char"]
-        W3["3. PII Redaction<br/>555-1234 → REDACTED<br/>email → EMAIL_REDACTED<br/>IP → IP_REDACTED"]
-        W4["4. Store to DynamoDB"]
-        
-        W1 --> W2 --> W3 --> W4
-    end
+    W1["⚙️ WORKER LAMBDAStep 1: Receive SQS Batch"]
+    W2["Step 2: Processsleep(len(text) × 0.05s)"]
+    W3["Step 3: PII Redaction555-1234 → [REDACTED]email → [EMAIL_REDACTED]IP → [IP_REDACTED]"]
+    W4["Step 4: Store to DynamoDB"]
 
     %% Storage
-    DB["💾 DYNAMODB TABLE<br/>Multi-Tenant Storage<br/>PK: TENANT#acme_corp → Partition A<br/>PK: TENANT#beta_inc → Partition B<br/>✅ Physical separation"]
+    DB["💾 DYNAMODB TABLEMulti-Tenant StoragePK: TENANT#acme_corpPK: TENANT#beta_inc✅ Physical separation"]
     
-    DLQ["❌ DEAD LETTER QUEUE<br/>Failed Messages after 3 retries<br/>• Timeout<br/>• Errors<br/>• Crashes<br/>⚡ Manual review"]
+    DLQ["❌ DEAD LETTER QUEUEFailed Messages (3 retries)Manual review required"]
 
     %% Connections
     JSON -->|Scenario 1| API
     TXT -->|Scenario 2| API
     API --> MERGE
-    MERGE -->|Both formats| INGESTION
-    INGESTION -->|Unified message| SQS
-    SQS -->|Batch trigger| WORKER
-    WORKER -->|✅ Success| DB
-    WORKER -->|❌ Failed 3x| DLQ
+    MERGE --> VALIDATE
+    VALIDATE -->|Step 2: Normalize| JSON_NORM
+    VALIDATE -->|Step 2: Normalize| TXT_NORM
+    JSON_NORM -->|Merge| UNIFIED
+    TXT_NORM -->|Merge| UNIFIED
+    UNIFIED --> SEND
+    SEND --> SQS
+    SQS -->|Batch trigger| W1
+    W1 --> W2
+    W2 --> W3
+    W3 --> W4
+    W4 -->|✅ Success| DB
+    W4 -->|❌ Failed 3x| DLQ
 
     %% Apply styles
     class JSON,TXT clientStyle
     class API apiStyle
     class MERGE mergeStyle
-    class INGESTION,WORKER lambdaStyle
+    class VALIDATE,JSON_NORM,TXT_NORM,UNIFIED,SEND lambdaStyle
     class SQS queueStyle
+    class W1,W2,W3,W4 lambdaStyle
     class DB storageStyle
     class DLQ dlqStyle
 ```
@@ -844,18 +835,6 @@ See diagram above showing JSON/TXT merge
 
 ---
 
-## 🤝 Contributing
-
-### Development Workflow
-
-1. Fork repository
-2. Create feature branch
-3. Add tests (maintain 75%+ coverage)
-4. Run tests: `pytest tests/ -v`
-5. Push to GitHub
-6. CI/CD deploys automatically
-
----
 
 ## 📄 License
 
