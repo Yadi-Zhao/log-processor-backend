@@ -55,7 +55,11 @@ def lambda_handler(event, context):
         # Handle plain text payload
         elif 'text/plain' in content_type:
             tenant_id = headers_lower.get('x-tenant-id')
-            log_id = str(uuid.uuid4())
+            log_id = headers_lower.get('x-log-id')
+
+            if not log_id:
+                log_id = str(uuid.uuid4())  
+
             text = body
             source = 'text'
         
@@ -67,11 +71,24 @@ def lambda_handler(event, context):
             }
         
         # Validate required fields
-        if not tenant_id or not text:
+        if not tenant_id:
             return {
                 'statusCode': 400,
                 'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'error': 'Missing tenant_id or text'})
+                'body': json.dumps({
+                    'error': 'Missing required field: tenant_id',
+                    'detail': 'tenant_id is required'
+                })
+            }
+
+        if not text:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'error': 'Missing required field: text',
+                    'detail': 'text is required'
+                })
             }
         
         if not isinstance(tenant_id, str):

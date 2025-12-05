@@ -3,6 +3,28 @@ Unit tests for the ingestion Lambda function.
 
 This module tests the API request handling, input validation, and message queuing
 functionality of the ingestion endpoint.
+
+TEST STRUCTURE:
+├── Section 1: JSON Format Tests
+│   ├── Valid Requests
+│   └── Invalid Requests
+│
+├── Section 2: Plain Text Format Tests
+│   ├── Valid Requests
+│   └── Invalid Requests
+│
+├── Section 3: Input Validation Tests
+│   ├── tenant_id Validation
+│   ├── text Validation
+│   └── log_id Validation
+│
+├── Section 4: Content-Type Tests
+│
+├── Section 5: Message Queue Integration Tests
+│
+├── Section 6: Response Format Tests
+│
+└── Section 7: Error Handling Tests
 """
 
 import json
@@ -56,8 +78,12 @@ def mock_sqs_client():
         yield mock_sqs
 
 
-class TestJSONPayloadHandling:
-    """Tests for JSON format request handling."""
+
+# SECTION 1: JSON FORMAT TESTS - Valid Requests
+
+
+class TestJSONFormatValidRequests:
+    """Tests for valid JSON format requests."""
     
     def test_valid_json_request_with_all_fields(self, mock_sqs_client):
         """
@@ -110,6 +136,14 @@ class TestJSONPayloadHandling:
         # Should have generated a UUID
         assert 'log_id' in body
         assert len(body['log_id']) == 36  # UUID format
+
+
+
+# SECTION 1: JSON FORMAT TESTS - Invalid Requests
+
+
+class TestJSONFormatInvalidRequests:
+    """Tests for invalid JSON format requests."""
     
     def test_malformed_json_returns_400(self, mock_sqs_client):
         """
@@ -159,8 +193,12 @@ class TestJSONPayloadHandling:
         assert response['statusCode'] == 400
 
 
-class TestPlainTextPayloadHandling:
-    """Tests for plain text format request handling."""
+
+# SECTION 2: PLAIN TEXT FORMAT TESTS - Valid Requests
+
+
+class TestPlainTextFormatValidRequests:
+    """Tests for valid plain text format requests."""
     
     def test_valid_text_request(self, mock_sqs_client):
         """
@@ -197,10 +235,114 @@ class TestPlainTextPayloadHandling:
         response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 202
+    
+    def test_text_request_with_custom_log_id(self, mock_sqs_client):
+        """
+        Text format should support custom log_id via X-Log-Id header.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': 'test-tenant',
+                'X-Log-Id': 'custom-log-999'  
+            },
+            'body': 'System health check passed'
+        }
+    
+        response = lambda_function.lambda_handler(event, None)
+    
+        assert response['statusCode'] == 202
+        body = json.loads(response['body'])
+        assert body['log_id'] == 'custom-log-999'  
+
+    def test_text_request_without_log_id_autogenerates(self, mock_sqs_client):
+        """
+        Text format without X-Log-Id should auto-generate UUID.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': 'test-tenant'
+              
+            },
+            'body': 'System health check passed'
+        }
+    
+        response = lambda_function.lambda_handler(event, None)
+    
+        assert response['statusCode'] == 202
+        body = json.loads(response['body'])
+        assert 'log_id' in body
+        assert len(body['log_id']) == 36  # UUID format
 
 
-class TestInputValidation:
-    """Tests for input validation and error handling."""
+
+# SECTION 2: PLAIN TEXT FORMAT TESTS - Invalid Requests
+
+
+class TestPlainTextFormatInvalidRequests:
+    """Tests for invalid plain text format requests."""
+    
+    def test_empty_text_body_is_rejected(self, mock_sqs_client):
+        """
+        Plain text format with empty body should be rejected.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': 'test-tenant'
+            },
+            'body': ''  # Empty string
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'error' in body
+        assert 'text' in body['error'].lower() or 'text' in body.get('detail', '').lower()
+    
+    def test_missing_tenant_id_in_text_format(self, mock_sqs_client):
+        """
+        Plain text format must include X-Tenant-Id header.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain'
+                # Missing X-Tenant-Id
+            },
+            'body': 'Some log message'
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'tenant_id' in body['error'].lower()
+    
+    def test_empty_tenant_id_header_in_text_format(self, mock_sqs_client):
+        """
+        Empty X-Tenant-Id header should be rejected.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': ''  # Empty string
+            },
+            'body': 'Some log message'
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+
+
+
+# SECTION 3: INPUT VALIDATION TESTS - tenant_id Validation
+
+
+class TestTenantIdValidation:
+    """Tests for tenant_id field validation."""
     
     def test_missing_tenant_id_in_json(self, mock_sqs_client):
         """
@@ -220,23 +362,6 @@ class TestInputValidation:
         body = json.loads(response['body'])
         assert 'error' in body
         assert 'tenant_id' in body['error'].lower()
-    
-    def test_missing_text_field(self, mock_sqs_client):
-        """
-        Request must include actual log content.
-        """
-        event = {
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({
-                'tenant_id': 'delta-corp'
-            })
-        }
-        
-        response = lambda_function.lambda_handler(event, None)
-        
-        assert response['statusCode'] == 400
-        body = json.loads(response['body'])
-        assert 'error' in body
     
     def test_empty_tenant_id_is_rejected(self, mock_sqs_client):
         """
@@ -366,6 +491,67 @@ class TestInputValidation:
             response = lambda_function.lambda_handler(event, None)
             assert response['statusCode'] == 202, f"Failed for tenant_id: {tenant_id}"
     
+    def test_very_long_tenant_id_in_header(self, mock_sqs_client):
+        """
+        Plain text format with overly long X-Tenant-Id should be rejected.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': 'a' * 101  # Over 100 characters
+            },
+            'body': 'Test message'
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert '100' in body['detail']
+    
+    def test_special_characters_in_header_tenant_id(self, mock_sqs_client):
+        """
+        X-Tenant-Id header with special characters should be rejected.
+        """
+        event = {
+            'headers': {
+                'Content-Type': 'text/plain',
+                'X-Tenant-Id': "test'; DROP TABLE--"  # SQL injection attempt
+            },
+            'body': 'Test message'
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'letters, numbers, hyphens, and underscores' in body['detail'].lower()
+
+
+
+# SECTION 3: INPUT VALIDATION TESTS - text Validation
+
+
+class TestTextValidation:
+    """Tests for text field validation."""
+    
+    def test_missing_text_field(self, mock_sqs_client):
+        """
+        Request must include actual log content.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'delta-corp'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'error' in body
+    
     def test_reject_non_string_text(self, mock_sqs_client):
         """
         text must be a string, not an array or other type.
@@ -434,6 +620,32 @@ class TestInputValidation:
         response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 413
+    
+    def test_json_with_empty_string_text(self, mock_sqs_client):
+        """
+        JSON format with empty string text field should be rejected.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'text': ''  # Empty string
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'text' in body['error'].lower() or 'text' in body.get('detail', '').lower()
+
+
+
+# SECTION 3: INPUT VALIDATION TESTS - log_id Validation
+
+
+class TestLogIdValidation:
+    """Tests for log_id field validation."""
     
     def test_reject_non_string_log_id(self, mock_sqs_client):
         """
@@ -607,6 +819,14 @@ class TestInputValidation:
         response = lambda_function.lambda_handler(event, None)
         
         assert response['statusCode'] == 400
+
+
+
+# SECTION 4: CONTENT-TYPE TESTS
+
+
+class TestContentTypeHandling:
+    """Tests for Content-Type header handling."""
     
     def test_unsupported_content_type(self, mock_sqs_client):
         """
@@ -622,7 +842,28 @@ class TestInputValidation:
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
         assert 'Unsupported Content-Type' in body['error']
+    
+    def test_missing_content_type_header(self, mock_sqs_client):
+        """
+        Request without Content-Type header should be rejected.
+        """
+        event = {
+            'headers': {
+                # No Content-Type
+            },
+            'body': json.dumps({
+                'tenant_id': 'test',
+                'text': 'message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'Content-Type' in body['error'] or 'Unsupported' in body['error']
 
+#Section 5: Message Queue Integration Tests
 
 class TestMessageQueueing:
     """Tests for SQS message queuing functionality."""
@@ -667,6 +908,7 @@ class TestMessageQueueing:
         # Verify timestamp is in ISO format
         datetime.fromisoformat(message_body['timestamp'])
 
+#Section 6: Response Format Tests
 
 class TestResponseFormat:
     """Tests for API response format and headers."""
@@ -703,6 +945,8 @@ class TestResponseFormat:
         
         assert response['headers']['Content-Type'] == 'application/json'
 
+
+#Section 7: Error Handling Tests
 
 class TestErrorHandling:
     """Tests for error scenarios and exception handling."""
