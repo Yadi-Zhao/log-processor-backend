@@ -254,21 +254,6 @@ class TestInputValidation:
         
         assert response['statusCode'] == 400
     
-    def test_unsupported_content_type(self, mock_sqs_client):
-        """
-        Only JSON and plain text are supported content types.
-        """
-        event = {
-            'headers': {'Content-Type': 'application/xml'},
-            'body': '<log><text>XML format</text></log>'
-        }
-        
-        response = lambda_function.lambda_handler(event, None)
-        
-        assert response['statusCode'] == 400
-        body = json.loads(response['body'])
-        assert 'Unsupported Content-Type' in body['error']
-    
     def test_reject_non_string_tenant_id(self, mock_sqs_client):
         """
         tenant_id must be a string, not a number or other type.
@@ -287,24 +272,6 @@ class TestInputValidation:
         body = json.loads(response['body'])
         assert 'tenant_id must be a string' in body['detail'].lower()
     
-    def test_reject_non_string_text(self, mock_sqs_client):
-        """
-        text must be a string, not an array or other type.
-        """
-        event = {
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({
-                'tenant_id': 'test-tenant',
-                'text': ['array', 'not', 'string']  # Array, not string
-            })
-        }
-        
-        response = lambda_function.lambda_handler(event, None)
-        
-        assert response['statusCode'] == 400
-        body = json.loads(response['body'])
-        assert 'text must be a string' in body['detail'].lower()
-
     def test_reject_tenant_id_with_special_characters(self, mock_sqs_client):
         """
         tenant_id should only contain alphanumeric, hyphen, and underscore.
@@ -356,6 +323,24 @@ class TestInputValidation:
         
         assert response['statusCode'] == 400
     
+    def test_reject_overly_long_tenant_id(self, mock_sqs_client):
+        """
+        tenant_id should not exceed maximum length (100 characters).
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'a' * 101,  # 101 characters
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert '100' in body['detail']  # Mentions the limit
+    
     def test_accept_valid_tenant_id_formats(self, mock_sqs_client):
         """
         Valid tenant_id formats should be accepted.
@@ -381,14 +366,104 @@ class TestInputValidation:
             response = lambda_function.lambda_handler(event, None)
             assert response['statusCode'] == 202, f"Failed for tenant_id: {tenant_id}"
     
-    def test_reject_overly_long_tenant_id(self, mock_sqs_client):
+    def test_reject_non_string_text(self, mock_sqs_client):
         """
-        tenant_id should not exceed maximum length (100 characters).
+        text must be a string, not an array or other type.
         """
         event = {
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
-                'tenant_id': 'a' * 101,  # 101 characters
+                'tenant_id': 'test-tenant',
+                'text': ['array', 'not', 'string']  # Array, not string
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'text must be a string' in body['detail'].lower()
+    
+    def test_reject_text_exceeding_17000_chars(self, mock_sqs_client):
+        """
+        Text exceeding 17000 characters should be rejected.
+        This prevents Lambda timeout (900s ÷ 0.05s/char = 18000 max).
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'text': 'a' * 17001  # Just over the limit
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 413  # Payload Too Large
+        body = json.loads(response['body'])
+        assert '17000' in body['error']
+    
+    def test_accept_text_at_17000_chars(self, mock_sqs_client):
+        """
+        Text at exactly 17000 characters should be accepted.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'text': 'a' * 17000  # Exactly at the limit
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 202  # Should be accepted
+    
+    def test_reject_extremely_long_text(self, mock_sqs_client):
+        """
+        Extremely long text (attack scenario) should be rejected.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'attacker',
+                'text': 'x' * 100000  # 100,000 characters
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 413
+    
+    def test_reject_non_string_log_id(self, mock_sqs_client):
+        """
+        log_id must be a string, not a number or other type.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'log_id': 12345,  # Number, not string
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'log_id must be a string' in body['detail'].lower()
+    
+    def test_reject_overly_long_log_id(self, mock_sqs_client):
+        """
+        log_id exceeding 100 characters should be rejected.
+        This prevents DynamoDB Sort Key overflow (1024 byte limit).
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'log_id': 'a' * 101,  # 101 characters
                 'text': 'Test message'
             })
         }
@@ -398,8 +473,156 @@ class TestInputValidation:
         assert response['statusCode'] == 400
         body = json.loads(response['body'])
         assert '100' in body['detail']  # Mentions the limit
+        assert 'log_id' in body['detail'].lower()
     
-   
+    def test_accept_log_id_at_100_chars(self, mock_sqs_client):
+        """
+        log_id at exactly 100 characters should be accepted.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'log_id': 'a' * 100,  # Exactly 100 characters
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 202  # Should be accepted
+    
+    def test_reject_extremely_long_log_id(self, mock_sqs_client):
+        """
+        Extremely long log_id (malicious attack) should be rejected.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'attacker',
+                'log_id': 'evil-' * 1000,  # 5000 characters
+                'text': 'Attack attempt'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'log_id' in body['detail'].lower()
+    
+    def test_accept_valid_uuid_log_id(self, mock_sqs_client):
+        """
+        Standard UUID format should be accepted.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                'log_id': '550e8400-e29b-41d4-a716-446655440000',  # Valid UUID
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 202
+    
+    def test_accept_custom_log_id_formats(self, mock_sqs_client):
+        """
+        Various valid custom log_id formats should be accepted.
+        """
+        valid_log_ids = [
+            'log-001',
+            'custom-id-123',
+            'my_log_id',
+            'LOG-2024-12-03',
+            'a',  # Single character
+            'log-with-many-hyphens-2024-12-03-001'
+        ]
+        
+        for log_id in valid_log_ids:
+            event = {
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'tenant_id': 'test',
+                    'log_id': log_id,
+                    'text': 'test'
+                })
+            }
+            
+            response = lambda_function.lambda_handler(event, None)
+            assert response['statusCode'] == 202, f"Failed for log_id: {log_id}"
+    
+    def test_auto_generate_log_id_when_not_provided(self, mock_sqs_client):
+        """
+        When log_id is not provided, system should auto-generate a UUID.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test-tenant',
+                # No log_id provided
+                'text': 'Test message'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 202
+        body = json.loads(response['body'])
+        assert 'log_id' in body
+        assert len(body['log_id']) == 36  # UUID v4 format is 36 chars
+    
+    def test_reject_log_id_as_array(self, mock_sqs_client):
+        """
+        log_id as array should be rejected.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test',
+                'log_id': ['array', 'of', 'ids'],
+                'text': 'test'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+    
+    def test_reject_log_id_as_object(self, mock_sqs_client):
+        """
+        log_id as object should be rejected.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'tenant_id': 'test',
+                'log_id': {'id': '123'},
+                'text': 'test'
+            })
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+    
+    def test_unsupported_content_type(self, mock_sqs_client):
+        """
+        Only JSON and plain text are supported content types.
+        """
+        event = {
+            'headers': {'Content-Type': 'application/xml'},
+            'body': '<log><text>XML format</text></log>'
+        }
+        
+        response = lambda_function.lambda_handler(event, None)
+        
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert 'Unsupported Content-Type' in body['error']
+
 
 class TestMessageQueueing:
     """Tests for SQS message queuing functionality."""

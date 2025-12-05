@@ -11,6 +11,7 @@ QUEUE_URL = os.environ.get('SQS_QUEUE_URL')
 
 MAX_CHAR_LIMIT = 17000
 MAX_TENANT_ID_LENGTH = 100
+MAX_LOG_ID_LENGTH = 100
 TENANT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 def lambda_handler(event, context):
@@ -93,6 +94,26 @@ def lambda_handler(event, context):
                 })
             }
         
+        if log_id:
+            if not isinstance(log_id, str):
+                return {
+                    'statusCode': 400,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({
+                        'error': 'Validation failed',
+                        'detail': 'log_id must be a string'
+                    })
+                }
+            if len(log_id) > MAX_LOG_ID_LENGTH:
+                print(f"✗ log_id too long: {len(log_id)} chars")
+                return {
+                    'statusCode': 400,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({
+                        'error': 'Validation failed',
+                        'detail': f'log_id must not exceed {MAX_LOG_ID_LENGTH} characters (got {len(log_id)})'
+                    })
+                }
         
         if len(tenant_id) > MAX_TENANT_ID_LENGTH:
             return {
@@ -103,6 +124,7 @@ def lambda_handler(event, context):
                     'detail': f'tenant_id exceeds {MAX_TENANT_ID_LENGTH} characters'
                 })
             }
+        
         
         if not TENANT_ID_PATTERN.match(tenant_id):
             return {
