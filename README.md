@@ -51,39 +51,39 @@ graph TB
     classDef mergeStyle fill:#FFF9C4,stroke:#F57F17,stroke-width:4px,color:#000
 
     %% Client Layer
-    JSON["📱 JSON RequestContent-Type: application/json{tenant_id, log_id, text}"]
-    TXT["📱 TXT RequestContent-Type: text/plainX-Tenant-ID: acme"]
+    JSON["📱 JSON Request<br/>Content-Type: application/json<br/>{tenant_id, log_id, text}"]
+    TXT["📱 TXT Request<br/>Content-Type: text/plain<br/>X-Tenant-ID: acme<br/>X-Log-ID: log-123 (optional)"]
 
     %% API Gateway
-    API["🌐 API GATEWAYPOST /ingestReturns: 202 Accepted"]
+    API["🌐 API GATEWAY<br/>POST /ingest<br/>Returns: 202 Accepted"]
 
     %% Merge Point
-    MERGE["⚡ MERGE POINTBoth formats converge here"]
+    MERGE["⚡ MERGE POINT<br/>Both formats converge here"]
 
     %% Ingestion Lambda steps
-    VALIDATE["🔧 INGESTION LAMBDAStep 1: Validate Input"]
+    VALIDATE["🔧 INGESTION LAMBDA<br/>Step 1: Validate Input"]
     
-    JSON_NORM["IF JSON:tenant_id = body['tenant_id']text = body['text']source = 'json'"]
+    JSON_NORM["IF JSON:<br/>tenant_id = body['tenant_id']<br/>text = body['text']<br/>log_id = body.get('log_id', UUID)<br/>source = 'json'"]
     
-    TXT_NORM["IF TXT:tenant_id = headers['X-Tenant-ID']text = bodysource = 'text'"]
+    TXT_NORM["IF TXT:<br/>tenant_id = headers['X-Tenant-ID']<br/>text = body<br/>log_id = headers.get('X-Log-ID', UUID)<br/>source = 'text'"]
     
-    UNIFIED["✅ UNIFIED OUTPUT{tenant_id, log_id, text, source, timestamp}"]
+    UNIFIED["✅ UNIFIED OUTPUT<br/>{tenant_id, log_id, text, source, timestamp}"]
     
     SEND["Step 4: Send to SQS"]
 
     %% SQS Queue
-    SQS["📬 AWS SQS QUEUEVisibility: 900s | Retry: 3xBatch: 10 msgs | Concurrency: 100"]
+    SQS["📬 AWS SQS QUEUE<br/>Visibility: 900s | Retry: 3x<br/>Batch: 10 msgs | Concurrency: 100"]
 
     %% Worker Lambda
-    W1["⚙️ WORKER LAMBDAStep 1: Receive SQS Batch"]
-    W2["Step 2: Processsleep(len(text) × 0.05s)"]
-    W3["Step 3: PII Redaction555-1234 → [REDACTED]email → [EMAIL_REDACTED]IP → [IP_REDACTED]"]
+    W1["⚙️ WORKER LAMBDA<br/>Step 1: Receive SQS Batch"]
+    W2["Step 2: Process<br/>sleep(len(text) × 0.05s)"]
+    W3["Step 3: PII Redaction<br/>555-1234 → [REDACTED]<br/>email → [EMAIL_REDACTED]<br/>IP → [IP_REDACTED]"]
     W4["Step 4: Store to DynamoDB"]
 
     %% Storage
-    DB["💾 DYNAMODB TABLEMulti-Tenant StoragePK: TENANT#acme_corpPK: TENANT#beta_inc✅ Physical separation"]
+    DB["💾 DYNAMODB TABLE<br/>Multi-Tenant Storage<br/>PK: TENANT#acme_corp<br/>PK: TENANT#beta_inc<br/>✅ Physical separation"]
     
-    DLQ["❌ DEAD LETTER QUEUEFailed Messages (3 retries)Manual review required"]
+    DLQ["❌ DEAD LETTER QUEUE<br/>Failed Messages (3 retries)<br/>Manual review required"]
 
     %% Connections
     JSON -->|Scenario 1| API
@@ -441,8 +441,10 @@ curl -X POST https://your-api-url/prod/ingest \
 curl -X POST https://your-api-url/prod/ingest \
   -H "Content-Type: text/plain" \
   -H "X-Tenant-ID: beta_inc" \
+  -H "X-Log-ID: log-67890" \
   -d "User 555-0199 logged in from 192.168.1.1"
 ```
+**Note**: The `X-Log-ID` header is **optional**. If omitted, a UUID will be auto-generated.
 
 **Response (202 Accepted):**
 ```json
