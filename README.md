@@ -1,5 +1,6 @@
 # Multi-Tenant Log Processing System
-
+**Live API Endpoint:**  
+👉 https://cbpic38lul.execute-api.us-east-1.amazonaws.com/prod/ingest
 > **Backend Engineering Assessment**: Scalable, serverless API for ingesting and processing unstructured logs with strict tenant isolation.
 
 ## 📁 Project Structure
@@ -413,12 +414,12 @@ Messages that fail 3 times go to DLQ:
 POST /ingest
 ```
 
-**Deployment URL**: `https://{api-id}.execute-api.us-east-1.amazonaws.com/prod/ingest`
+**Deployment URL**: `https://cbpic38lul.execute-api.us-east-1.amazonaws.com/prod/ingest`
 
 ### Scenario 1: JSON Format
 
 ```bash
-curl -X POST https://your-api-url/prod/ingest \
+curl -X POST https://cbpic38lul.execute-api.us-east-1.amazonaws.com/prod/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_id": "acme_corp",
@@ -439,7 +440,7 @@ curl -X POST https://your-api-url/prod/ingest \
 ### Scenario 2: Plain Text Format
 
 ```bash
-curl -X POST https://your-api-url/prod/ingest \
+curl -X POST https://cbpic38lul.execute-api.us-east-1.amazonaws.com/prod/ingest \
   -H "Content-Type: text/plain" \
   -H "X-Tenant-ID: beta_inc" \
   -H "X-Log-ID: log-67890" \
@@ -602,7 +603,7 @@ pytest tests/test_worker_lambda.py -v
 
 ### Test Coverage
 
-**Ingestion Lambda** (65+ tests):
+**Ingestion Lambda** (70+ tests):
 - ✅ JSON format validation
 - ✅ Plain text format validation
 - ✅ `tenant_id` constraints (pattern, length)
@@ -611,7 +612,7 @@ pytest tests/test_worker_lambda.py -v
 - ✅ Content-Type handling
 - ✅ Error responses
 
-**Worker Lambda** (50+ tests):
+**Worker Lambda** (60+ tests):
 - ✅ Message processing
 - ✅ Processing time calculation (0.05s/char)
 - ✅ PII redaction patterns
